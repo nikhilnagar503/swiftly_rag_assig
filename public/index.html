@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RAG Pipeline Demo</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2230; --muted:#6b7385; --line:#e3e6ec; --accent:#3b5bdb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; background:var(--card); border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:14px; }
+  header h1 { margin:0; font-size:18px; }
+  #mode { font-size:12px; color:var(--muted); }
+  main { max-width:1100px; margin:20px auto; padding:0 16px; display:grid; grid-template-columns:320px 1fr; gap:16px; }
+  @media (max-width:800px) { main { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  #drop { border:2px dashed var(--line); border-radius:8px; padding:20px; text-align:center; color:var(--muted); cursor:pointer; }
+  #drop.over { border-color:var(--accent); color:var(--accent); }
+  ul { list-style:none; margin:12px 0 0; padding:0; }
+  li.doc { display:flex; justify-content:space-between; gap:8px; align-items:center; padding:8px 0; border-top:1px solid var(--line); font-size:14px; }
+  li.doc small { color:var(--muted); display:block; }
+  button { font:inherit; border:0; border-radius:6px; padding:8px 14px; background:var(--accent); color:#fff; cursor:pointer; }
+  button.link { background:none; color:#c92a2a; padding:2px 6px; font-size:13px; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; }
+  input[type=text] { flex:1; font:inherit; padding:9px 12px; border:1px solid var(--line); border-radius:6px; }
+  select { font:inherit; padding:8px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+  #answer { white-space:pre-wrap; margin-top:14px; }
+  .src { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:10px; }
+  .src header { all:unset; display:flex; justify-content:space-between; font-size:13px; font-weight:600; margin-bottom:6px; }
+  .bar { height:6px; background:var(--line); border-radius:3px; overflow:hidden; margin-bottom:8px; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  .src p { margin:0; font-size:13px; color:#3b4252; white-space:pre-wrap; max-height:140px; overflow:auto; }
+  .msg { font-size:13px; color:var(--muted); margin-top:8px; }
+  .err { color:#c92a2a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RAG Pipeline Demo</h1>
+  <span id="mode">loading...</span>
+</header>
+<main>
+  <section class="card">
+    <h2>1. Documents</h2>
+    <div id="drop">Drop PDF / TXT / MD here<br />or click to choose</div>
+    <input id="file" type="file" accept=".pdf,.txt,.md" multiple hidden />
+    <div id="uploadMsg" class="msg"></div>
+    <ul id="docs"></ul>
+  </section>
+
+  <section class="card">
+    <h2>2. Ask a question</h2>
+    <form id="askForm" class="row">
+      <input id="q" type="text" placeholder="Ask something about your documents..." autocomplete="off" />
+      <select id="topK" title="Chunks to retrieve">
+        <option value="3">top 3</option><option value="4" selected>top 4</option>
+        <option value="6">top 6</option><option value="8">top 8</option>
+      </select>
+      <button id="askBtn">Ask</button>
+    </form>
+    <div id="answer"></div>
+    <div id="sources"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || res.statusText);
+  return json;
+}
+
+async function refresh() {
+  const [status, docs] = await Promise.all([api("/api/status"), api("/api/docs")]);
+  $("mode").textContent = `${status.mode} mode | embedder: ${status.embedder} | LLM: ${status.chatModel} | ${status.docs} docs, ${status.chunks} chunks`;
+  $("docs").innerHTML = docs.map((d) => `
+    <li class="doc"><span>${esc(d.name)}<small>${d.chunks} chunks</small></span>
+    <button class="link" data-id="${d.id}">remove</button></li>`).join("");
+}
+
+$("docs").addEventListener("click", async (e) => {
+  const id = e.target.dataset?.id;
+  if (!id) return;
+  await api("/api/docs/" + id, { method: "DELETE" });
+  refresh();
+});
+
+async function upload(files) {
+  for (const f of files) {
+    $("uploadMsg").className = "msg";
+    $("uploadMsg").textContent = `Embedding ${f.name}...`;
+    try {
+      const doc = await api("/api/upload?name=" + encodeURIComponent(f.name), { method: "POST", body: f });
+      $("uploadMsg").textContent = `Added ${doc.name}: ${doc.chunks} chunks`;
+    } catch (err) {
+      $("uploadMsg").className = "msg err";
+      $("uploadMsg").textContent = `${f.name}: ${err.message}`;
+    }
+  }
+  refresh();
+}
+
+$("drop").onclick = () => $("file").click();
+$("file").onchange = (e) => { upload([...e.target.files]); e.target.value = ""; };
+$("drop").ondragover = (e) => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = (e) => { e.preventDefault(); $("drop").classList.remove("over"); upload([...e.dataTransfer.files]); };
+
+$("askForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const question = $("q").value.trim();
+  if (!question) return;
+  $("askBtn").disabled = true;
+  $("answer").className = "";
+  $("answer").textContent = "Thinking...";
+  $("sources").innerHTML = "";
+  try {
+    const r = await api("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, topK: Number($("topK").value) }),
+    });
+    $("answer").textContent = r.answer;
+    $("sources").innerHTML = "<h2 style='margin-top:18px'>Retrieved chunks (relevance = cosine similarity)</h2>" +
+      r.sources.map((s) => `
+      <div class="src">
+        <header><span>[${s.n}] ${esc(s.docName)} - chunk ${s.chunkIndex}</span><span>score ${s.score.toFixed(3)}</span></header>
+        <div class="bar"><i style="width:${Math.max(0, Math.min(1, s.score)) * 100}%"></i></div>
+        <p>${esc(s.text)}</p>
+      </div>`).join("");
+  } catch (err) {
+    $("answer").className = "err";
+    $("answer").textContent = err.message;
+  } finally {
+    $("askBtn").disabled = false;
+  }
+};
+
+refresh();
+</script>
+</body>
+</html>
